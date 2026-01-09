@@ -6,6 +6,8 @@ use embedded_hal_async::spi::SpiDevice;
 pub use w5100s::W5100S;
 mod w6100;
 pub use w6100::W6100;
+mod w6300;
+pub use w6300::W6300;
 
 pub(crate) trait SealedChip {
     type Address;
