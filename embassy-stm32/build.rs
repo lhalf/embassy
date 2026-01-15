@@ -305,6 +305,9 @@ fn main() {
         Some("tim22") => "TIM22",
         Some("tim23") => "TIM23",
         Some("tim24") => "TIM24",
+        Some("lptim1") => "LPTIM1",
+        Some("lptim2") => "LPTIM2",
+        Some("lptim3") => "LPTIM3",
         Some("any") => {
             // Order of TIM candidators:
             // 1. 2CH -> 2CH_CMP -> GP16 -> GP32 -> ADV
@@ -325,11 +328,13 @@ fn main() {
     let time_driver_irq_decl = if !time_driver_singleton.is_empty() {
         cfgs.enable(format!("time_driver_{}", time_driver_singleton.to_lowercase()));
 
-        let p = peripheral_map.get(time_driver_singleton).unwrap();
+        let Some(p) = peripheral_map.get(time_driver_singleton) else {
+            panic!("Tried to select {time_driver_singleton}, which is not available on this device");
+        };
         let irqs: BTreeSet<_> = p
             .interrupts
             .iter()
-            .filter(|i| i.signal == "CC" || i.signal == "UP")
+            .filter(|i| i.signal == "CC" || i.signal == "UP" || i.signal == "GLOBAL")
             .map(|i| i.interrupt.to_ascii_uppercase())
             .collect();
 
@@ -350,8 +355,8 @@ fn main() {
     };
 
     for tim in [
-        "tim1", "tim2", "tim3", "tim4", "tim5", "tim8", "tim9", "tim12", "tim15", "tim20", "tim21", "tim22", "tim23",
-        "tim24",
+        "lptim1", "lptim2", "lptim3", "tim1", "tim2", "tim3", "tim4", "tim5", "tim8", "tim9", "tim12", "tim15",
+        "tim20", "tim21", "tim22", "tim23", "tim24",
     ] {
         cfgs.declare(format!("time_driver_{}", tim));
     }
@@ -942,10 +947,18 @@ fn main() {
                     let en = rcc.enable.as_ref().unwrap();
                     let en_reg = format_ident!("{}", en.register.to_ascii_lowercase());
                     let set_en_field = format_ident!("set_{}", en.field.to_ascii_lowercase());
-
                     gg.extend(quote! {
                         crate::pac::RCC.#en_reg().modify(|w| w.#set_en_field(true));
-                    })
+                    });
+                    // enable for both cores or if the primary core goes in stop mode devices become unavailable!
+                    // particularly problematic for GPIOs and DMA
+                    if chip_name.starts_with("stm32wl5") {
+                        // second core clock enable registers start with "c2"
+                        let en_reg = format_ident!("c2{}", en.register.to_ascii_lowercase());
+                        gg.extend(quote! {
+                            crate::pac::RCC.#en_reg().modify(|w| w.#set_en_field(true));
+                        });
+                    }
                 }
             }
         }
@@ -1869,8 +1882,8 @@ fn main() {
             {
                 let kind = format_ident!("{}", kind);
                 let enum_name = format_ident!("{}", e.name);
-                let mut muls = Vec::new();
-                let mut divs = Vec::new();
+                let mut nums = Vec::new();
+                let mut denoms = Vec::new();
                 for v in e.variants {
                     let Ok(val) = parse_num(v.name) else {
                         panic!("could not parse mul/div. enum={} variant={}", e.name, v.name)
@@ -1879,26 +1892,23 @@ fn main() {
                     let variant = quote!(crate::pac::#kind::vals::#enum_name::#variant_name);
                     let num = val.num;
                     let denom = val.denom;
-                    muls.push(quote!(#variant => self * #num / #denom,));
-                    divs.push(quote!(#variant => self * #denom / #num,));
+                    nums.push(quote!(#variant => #num,));
+                    denoms.push(quote!(#variant => #denom,));
                 }
 
                 g.extend(quote! {
-                    impl core::ops::Div<crate::pac::#kind::vals::#enum_name> for crate::time::Hertz {
-                        type Output = crate::time::Hertz;
-                        fn div(self, rhs: crate::pac::#kind::vals::#enum_name) -> Self::Output {
-                            match rhs {
-                                #(#divs)*
+                    impl crate::time::Prescaler for crate::pac::#kind::vals::#enum_name {
+                        fn num(&self) -> u32 {
+                            match *self {
+                                #(#nums)*
                                 #[allow(unreachable_patterns)]
                                 _ => unreachable!(),
                             }
                         }
-                    }
-                    impl core::ops::Mul<crate::pac::#kind::vals::#enum_name> for crate::time::Hertz {
-                        type Output = crate::time::Hertz;
-                        fn mul(self, rhs: crate::pac::#kind::vals::#enum_name) -> Self::Output {
-                            match rhs {
-                                #(#muls)*
+
+                        fn denom(&self) -> u32 {
+                            match *self {
+                                #(#denoms)*
                                 #[allow(unreachable_patterns)]
                                 _ => unreachable!(),
                             }
